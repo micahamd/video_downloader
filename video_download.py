@@ -34,7 +34,7 @@ CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
     "default_output_path": "downloads",
     "default_resolution": "720",
-    "default_model": "base.en",
+    "default_model": "turbo",
     "temp_directory": None,
     "keep_temp_files": False
 }
@@ -279,53 +279,102 @@ def handle_local_transcription(window, model_choice):
         window['-LOG-'].print(f"Transcription error: {str(e)}")
         window['-PROGRESS-'].update(0)  # Reset progress on error
 
+# Modified create_layout() with a modern, grouped UI design
 def create_layout():
-    model_options = ['tiny.en','base.en','small.en','tiny', 'base', 'small', 'medium', 'large','turbo']
     layout = [
-        [sg.Text("Video URL:"), sg.Input(key="-URL-", size=(40, 1), tooltip="Enter YouTube URL")],
-        [sg.Text("Output Path:"), sg.Input(key="-OUTPUT-", default_text=".", size=(30, 1)), sg.FolderBrowse()],
-        [sg.Text("Max Resolution:"), sg.Combo(["2160", "1440", "1080", "720", "480", "360", "240", "144"], default_value="720", key="-RESOLUTION-")],
-        [sg.Checkbox("Audio Only", key="-AUDIO-", enable_events=True, tooltip="Download audio only (MP3)"),
-         sg.Checkbox("Transcribe (audio only)", key="-TRANSCRIBE-", tooltip="Generate text transcript for audio files", disabled=True)],
-        [sg.Text("Filename (optional):"), sg.Input(key="-FILENAME-", size=(30, 1))],
-        [sg.Text("Whisper Model:"), sg.Combo(model_options, default_value="base.en", key="-MODEL-")],
-        [sg.Button("Add to Queue", key="-ADD-QUEUE-"), 
-         sg.Button("Start Downloads", key="-START-DOWNLOADS-"), 
-         sg.Button("Clear Queue", key="-CLEAR-QUEUE-"), 
-         sg.Button("Abort", key="-ABORT-", button_color=('white', 'red')),
-         sg.Button("Local Transcription", key="-LOCAL-TRANSCRIBE-", button_color=('white', 'brown')),
-         sg.Button("Exit")],
-        [sg.Text("Download Queue:")],
-        [sg.Listbox(values=[], size=(50, 5), key="-QUEUE-")],
-        [sg.ProgressBar(100, orientation='h', size=(50, 20), key='-PROGRESS-')],
-        [sg.Multiline(size=(70, 10), key="-LOG-", autoscroll=True, disabled=True)]
+        [sg.Text("Video Downloader & Transcriber", font=("Helvetica", 16), justification="center", expand_x=True)],
+        [sg.Frame("Download Options", [
+            [sg.Text("Video URL:"), sg.Input(key="-URL-", size=(40, 1), tooltip="Enter YouTube URL")],
+            [sg.Text("Output Path:"), sg.Input(key="-OUTPUT-", default_text=".", size=(30, 1)), sg.FolderBrowse()],
+            [sg.Text("Max Resolution:"), sg.Combo(
+                ["2160", "1440", "1080", "720", "480", "360", "240", "144"], default_value="720", key="-RESOLUTION-")],
+            [sg.Checkbox("Audio Only", key="-AUDIO-", enable_events=True, tooltip="Download audio only (MP3)"),
+             sg.Checkbox("Transcribe (audio only)", key="-TRANSCRIBE-", tooltip="Generate transcript for audio files", disabled=True)],
+            [sg.Text("Filename (optional):"), sg.Input(key="-FILENAME-", size=(30, 1))],
+            [sg.Text("Whisper Model:"), sg.Combo(['tiny.en','base.en','small.en','tiny', 'base', 'small', 'medium', 'large','turbo'],
+                                                 default_value="turbo", key="-MODEL-")]
+        ], pad=(10,10))],
+        [sg.Frame("Actions", [
+            [sg.Button("Add to Queue", key="-ADD-QUEUE-", size=(15,1)),
+             sg.Button("Add Local Files", key="-ADD-LOCAL-", button_color=('white', 'brown'), size=(15,1))],
+            [sg.Button("Start Downloads", key="-START-DOWNLOADS-", size=(15,1)),
+             sg.Button("Clear Queue", key="-CLEAR-QUEUE-", size=(15,1)),
+             sg.Button("Abort", key="-ABORT-", button_color=('white', 'red'), size=(15,1))],
+            [sg.Button("Exit", size=(15,1))]
+        ], pad=(10,10), element_justification="center")],
+        [sg.Frame("Queue", [
+            [sg.Listbox(values=[], size=(60, 6), key="-QUEUE-")]
+        ], pad=(10,10))],
+        [sg.Frame("Progress & Logs", [
+            [sg.ProgressBar(100, orientation='h', size=(50, 20), key='-PROGRESS-')],
+            [sg.Multiline(size=(70, 10), key="-LOG-", autoscroll=True, disabled=True)]
+        ], pad=(10,10))]
     ]
     return layout
+
+def process_local_transcription_file(item, window):
+    file_path = item['local_file']
+    model_choice = item['model_choice']
+    window.write_event_value('-MESSAGE-', f"Processing transcription for: {file_path}")
+    window.write_event_value('-PROGRESS-', 0)
+    if not file_path.lower().endswith('.mp3'):
+        window.write_event_value('-MESSAGE-', f"Converting to MP3: {file_path}")
+        output_mp3 = os.path.splitext(file_path)[0] + '_converted.mp3'
+        if not convert_to_mp3(file_path, output_mp3):
+            window.write_event_value('-MESSAGE-', f"Conversion failed for {file_path}")
+            window.write_event_value('-PROGRESS-', 0)
+            return
+        file_path = output_mp3
+    try:
+        window.write_event_value('-MESSAGE-', f"Loading Whisper model: {model_choice}")
+        window.write_event_value('-PROGRESS-', 20)
+        whisper_model = whisper.load_model(model_choice)
+        window.write_event_value('-MESSAGE-', "Whisper model loaded successfully")
+    except Exception as e:
+        window.write_event_value('-MESSAGE-', f"Error loading model: {str(e)}")
+        window.write_event_value('-PROGRESS-', 0)
+        return
+    try:
+        window.write_event_value('-MESSAGE-', f"Starting transcription for: {file_path}")
+        window.write_event_value('-PROGRESS-', 50)
+        result = whisper_model.transcribe(file_path)
+        transcript_path = os.path.splitext(file_path)[0] + '_transcript.txt'
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            f.write(result["text"].strip())
+        window.write_event_value('-MESSAGE-', f"Transcription saved: {transcript_path}")
+        window.write_event_value('-PROGRESS-', 100)
+    except Exception as e:
+        window.write_event_value('-MESSAGE-', f"Transcription error: {str(e)}")
+        window.write_event_value('-PROGRESS-', 0)
 
 def process_download_queue(window, download_queue, abort_event):
     while True:
         item = download_queue.get()
-        if item is None:  # None is our signal to stop the thread
+        if item is None:  # Signal to stop the thread
             break
-        download_video(
-            url=item['url'],
-            output_path=item['output_path'],
-            resolution=item['resolution'],
-            audio_only=item['audio_only'],
-            filename=item['filename'],
-            transcribe=item['transcribe'],
-            model_choice=item['model_choice'],
-            window=window,
-            abort_event=abort_event
-        )
+        if 'local_file' in item:
+            process_local_transcription_file(item, window)
+        else:
+            download_video(
+                url=item['url'],
+                output_path=item['output_path'],
+                resolution=item['resolution'],
+                audio_only=item['audio_only'],
+                filename=item['filename'],
+                transcribe=item['transcribe'],
+                model_choice=item['model_choice'],
+                window=window,
+                abort_event=abort_event
+            )
         download_queue.task_done()
 
+# Modified main() to update the theme for a more modern look
 def main():
     setup_logging()
     config = load_config()
     
-    sg.theme('DefaultNoMoreNagging')
-    window = sg.Window("Video Downloader", create_layout())
+    sg.theme('DarkTeal9')  # Updated modern theme
+    window = sg.Window("Video Downloader", create_layout(), resizable=True)
     
     download_manager = DownloadManager(window)
     # ...existing main() code...
@@ -358,11 +407,30 @@ def main():
                         'model_choice': values["-MODEL-"]
                     }
                     queue_list.append(queue_item)
-                    window["-QUEUE-"].update([item['url'] for item in queue_list])
+                    window["-QUEUE-"].update([item.get('url', f"Transcribe: {os.path.basename(item['local_file'])}") for item in queue_list])
                     window["-URL-"].update("")
                     window["-LOG-"].print(f"Added to queue: {url}")
                 else:
                     sg.popup_error("Please enter a video URL.")
+
+            if event == "-ADD-LOCAL-":
+                # Allow multiple file selection for transcription
+                file_types = (
+                    ("Media Files", "*.mp4 *.avi *.mkv *.mov *.mp3 *.wav *.m4a *.flac"),
+                    ("All files", "*.*")
+                )
+                files = sg.popup_get_file("Select media files for transcription", multiple_files=True, file_types=file_types)
+                if files:
+                    # sg.popup_get_file returns a string of files separated by ';' on Windows
+                    for file_path in files.split(";"):
+                        if file_path:
+                            queue_item = {
+                                'local_file': file_path,
+                                'model_choice': values["-MODEL-"]
+                            }
+                            queue_list.append(queue_item)
+                            window["-QUEUE-"].update([item.get('url', f"Transcribe: {os.path.basename(item['local_file'])}") for item in queue_list])
+                            window["-LOG-"].print(f"Queued for transcription: {file_path}")
 
             if event == "-CLEAR-QUEUE-":
                 queue_list.clear()
@@ -373,7 +441,7 @@ def main():
                 if queue_list:
                     for item in queue_list:
                         download_queue.put(item)
-                    window["-LOG-"].print(f"Started downloading {len(queue_list)} videos.")
+                    window["-LOG-"].print(f"Started processing {len(queue_list)} items.")
                     queue_list.clear()
                     window["-QUEUE-"].update([])
                 else:
@@ -389,9 +457,9 @@ def main():
                             'model_choice': values["-MODEL-"]
                         }
                         download_queue.put(queue_item)
-                        window["-LOG-"].print(f"Started downloading: {url}")
+                        window["-LOG-"].print(f"Started processing: {url}")
                     else:
-                        sg.popup_error("Please enter a video URL or add videos to the queue.")
+                        sg.popup_error("Please enter a video URL or add items to the queue.")
 
             if event == "-ABORT-":
                 abort_event.set()
@@ -411,9 +479,6 @@ def main():
                 window["-TRANSCRIBE-"].update(disabled=not values["-AUDIO-"])
                 if not values["-AUDIO-"]:
                     window["-TRANSCRIBE-"].update(value=False)
-
-            if event == "-LOCAL-TRANSCRIBE-":
-                handle_local_transcription(window, values["-MODEL-"])
 
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
