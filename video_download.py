@@ -315,14 +315,15 @@ def create_layout():
 def process_local_transcription_file(item, window):
     file_path = item['local_file']
     model_choice = item['model_choice']
-    window.write_event_value('-MESSAGE-', f"Processing transcription for: {file_path}")
+    window.write_event_value('-MESSAGE-', f"Processing transcription for: {os.path.basename(file_path)}")
     window.write_event_value('-PROGRESS-', 0)
     if not file_path.lower().endswith('.mp3'):
-        window.write_event_value('-MESSAGE-', f"Converting to MP3: {file_path}")
+        window.write_event_value('-MESSAGE-', f"Converting to MP3: {os.path.basename(file_path)}")
         output_mp3 = os.path.splitext(file_path)[0] + '_converted.mp3'
         if not convert_to_mp3(file_path, output_mp3):
-            window.write_event_value('-MESSAGE-', f"Conversion failed for {file_path}")
+            window.write_event_value('-MESSAGE-', f"Conversion failed for {os.path.basename(file_path)}")
             window.write_event_value('-PROGRESS-', 0)
+            window.write_event_value('-DOWNLOAD-COMPLETE-', True)
             return
         file_path = output_mp3
     try:
@@ -333,9 +334,10 @@ def process_local_transcription_file(item, window):
     except Exception as e:
         window.write_event_value('-MESSAGE-', f"Error loading model: {str(e)}")
         window.write_event_value('-PROGRESS-', 0)
+        window.write_event_value('-DOWNLOAD-COMPLETE-', True)
         return
     try:
-        window.write_event_value('-MESSAGE-', f"Starting transcription for: {file_path}")
+        window.write_event_value('-MESSAGE-', f"Starting transcription for: {os.path.basename(file_path)}")
         window.write_event_value('-PROGRESS-', 50)
         result = whisper_model.transcribe(file_path)
         transcript_path = os.path.splitext(file_path)[0] + '_transcript.txt'
@@ -343,41 +345,73 @@ def process_local_transcription_file(item, window):
             f.write(result["text"].strip())
         window.write_event_value('-MESSAGE-', f"Transcription saved: {transcript_path}")
         window.write_event_value('-PROGRESS-', 100)
+        window.write_event_value('-DOWNLOAD-COMPLETE-', True)
     except Exception as e:
         window.write_event_value('-MESSAGE-', f"Transcription error: {str(e)}")
         window.write_event_value('-PROGRESS-', 0)
+        window.write_event_value('-DOWNLOAD-COMPLETE-', True)
 
 def process_download_queue(window, download_queue, abort_event):
     while True:
-        item = download_queue.get()
-        if item is None:  # Signal to stop the thread
-            break
-        if 'local_file' in item:
-            process_local_transcription_file(item, window)
-        else:
-            download_video(
-                url=item['url'],
-                output_path=item['output_path'],
-                resolution=item['resolution'],
-                audio_only=item['audio_only'],
-                filename=item['filename'],
-                transcribe=item['transcribe'],
-                model_choice=item['model_choice'],
-                window=window,
-                abort_event=abort_event
-            )
-        download_queue.task_done()
+        try:
+            item = download_queue.get()
+            if item is None:  # Signal to stop the thread
+                break
+            if abort_event.is_set():
+                window.write_event_value('-MESSAGE-', "Operation aborted by user")
+                window.write_event_value('-PROGRESS-', 0)
+                window.write_event_value('-DOWNLOAD-COMPLETE-', True)
+                download_queue.task_done()
+                continue
+                
+            if 'local_file' in item:
+                process_local_transcription_file(item, window)
+            else:
+                download_video(
+                    url=item['url'],
+                    output_path=item['output_path'],
+                    resolution=item['resolution'],
+                    audio_only=item['audio_only'],
+                    filename=item['filename'],
+                    transcribe=item['transcribe'],
+                    model_choice=item['model_choice'],
+                    window=window,
+                    abort_event=abort_event
+                )
+            download_queue.task_done()
+        except Exception as e:
+            error_msg = f"Queue processing error: {str(e)}"
+            logging.error(error_msg, exc_info=True)
+            window.write_event_value('-MESSAGE-', error_msg)
+            window.write_event_value('-DOWNLOAD-COMPLETE-', True)
+            download_queue.task_done()
 
-# Modified main() to update the theme for a more modern look
+# Function to format queue display items
+def format_queue_display(queue_list):
+    display_items = []
+    for idx, item in enumerate(queue_list, 1):
+        if 'local_file' in item:
+            display_items.append(f"{idx}. Transcribe: {os.path.basename(item['local_file'])}")
+        else:
+            display_name = item.get('filename') or item.get('url', 'Unknown URL')
+            audio_only = " (Audio Only)" if item.get('audio_only', False) else ""
+            display_items.append(f"{idx}. Download: {display_name}{audio_only}")
+    return display_items
+
 def main():
     setup_logging()
     config = load_config()
     
     sg.theme('DarkTeal9')  # Updated modern theme
-    window = sg.Window("Video Downloader", create_layout(), resizable=True)
+    window = sg.Window("Video Downloader", create_layout(), resizable=True, finalize=True)
     
     download_manager = DownloadManager(window)
-    # ...existing main() code...
+    
+    # Set default output path from config
+    default_output = config.get("default_output_path", "downloads")
+    window["-OUTPUT-"].update(default_output)
+    window["-RESOLUTION-"].update(config.get("default_resolution", "720"))
+    window["-MODEL-"].update(config.get("default_model", "turbo"))
 
     download_queue = Queue()
     abort_event = threading.Event()
@@ -385,6 +419,7 @@ def main():
     queue_thread.start()
 
     queue_list = []
+    is_processing = False
 
     try:
         while True:
@@ -395,19 +430,19 @@ def main():
                 break
 
             if event == "-ADD-QUEUE-":
-                url = values["-URL-"]
+                url = values.get("-URL-", "").strip()
                 if url:
                     queue_item = {
                         'url': url,
-                        'output_path': values["-OUTPUT-"],
-                        'resolution': values["-RESOLUTION-"],
-                        'audio_only': values["-AUDIO-"],
-                        'filename': values["-FILENAME-"],
-                        'transcribe': values["-TRANSCRIBE-"],
-                        'model_choice': values["-MODEL-"]
+                        'output_path': values.get("-OUTPUT-", "downloads"),
+                        'resolution': values.get("-RESOLUTION-", "720"),
+                        'audio_only': values.get("-AUDIO-", False),
+                        'filename': values.get("-FILENAME-", ""),
+                        'transcribe': values.get("-TRANSCRIBE-", False),
+                        'model_choice': values.get("-MODEL-", "turbo")
                     }
                     queue_list.append(queue_item)
-                    window["-QUEUE-"].update([item.get('url', f"Transcribe: {os.path.basename(item['local_file'])}") for item in queue_list])
+                    window["-QUEUE-"].update(format_queue_display(queue_list))
                     window["-URL-"].update("")
                     window["-LOG-"].print(f"Added to queue: {url}")
                 else:
@@ -421,16 +456,21 @@ def main():
                 )
                 files = sg.popup_get_file("Select media files for transcription", multiple_files=True, file_types=file_types)
                 if files:
-                    # sg.popup_get_file returns a string of files separated by ';' on Windows
-                    for file_path in files.split(";"):
-                        if file_path:
+                    # Handle file paths properly, normalizing them
+                    file_paths = [os.path.normpath(f.strip()) for f in files.split(";") if f.strip()]
+                    for file_path in file_paths:
+                        if os.path.exists(file_path):
                             queue_item = {
                                 'local_file': file_path,
-                                'model_choice': values["-MODEL-"]
+                                'model_choice': values.get("-MODEL-", "turbo")
                             }
                             queue_list.append(queue_item)
-                            window["-QUEUE-"].update([item.get('url', f"Transcribe: {os.path.basename(item['local_file'])}") for item in queue_list])
-                            window["-LOG-"].print(f"Queued for transcription: {file_path}")
+                            window["-LOG-"].print(f"Queued for transcription: {os.path.basename(file_path)}")
+                        else:
+                            window["-LOG-"].print(f"Error: File not found: {file_path}")
+                    
+                    # Update queue display
+                    window["-QUEUE-"].update(format_queue_display(queue_list))
 
             if event == "-CLEAR-QUEUE-":
                 queue_list.clear()
@@ -438,6 +478,13 @@ def main():
                 window["-LOG-"].print("Queue cleared.")
 
             if event == "-START-DOWNLOADS-":
+                if is_processing:
+                    sg.popup_warning("Already processing files. Please wait or abort current operation.")
+                    continue
+                    
+                is_processing = True
+                abort_event.clear()  # Reset abort flag
+                
                 if queue_list:
                     for item in queue_list:
                         download_queue.put(item)
@@ -445,7 +492,7 @@ def main():
                     queue_list.clear()
                     window["-QUEUE-"].update([])
                 else:
-                    url = values["-URL-"]
+                    url = values["-URL-"].strip()
                     if url:
                         queue_item = {
                             'url': url,
@@ -460,10 +507,11 @@ def main():
                         window["-LOG-"].print(f"Started processing: {url}")
                     else:
                         sg.popup_error("Please enter a video URL or add items to the queue.")
+                        is_processing = False
 
             if event == "-ABORT-":
                 abort_event.set()
-                window["-LOG-"].print("Aborting downloads...")
+                window["-LOG-"].print("Aborting current operation...")
 
             if event == '-PROGRESS-':
                 window['-PROGRESS-'].update(values[event])
@@ -473,6 +521,7 @@ def main():
 
             if event == '-DOWNLOAD-COMPLETE-':
                 window['-PROGRESS-'].update(0)
+                is_processing = False
 
             if event == "-AUDIO-":
                 # Enable/disable transcribe checkbox based on audio-only selection
@@ -481,7 +530,7 @@ def main():
                     window["-TRANSCRIBE-"].update(value=False)
 
     except Exception as e:
-        logging.error(f"Unexpected error: {e}")
+        logging.error(f"Unexpected error: {e}", exc_info=True)
         sg.popup_error("An unexpected error occurred. Check logs for details.")
     finally:
         download_manager.cleanup()
